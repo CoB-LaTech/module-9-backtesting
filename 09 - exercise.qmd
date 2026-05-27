@@ -1,0 +1,84 @@
+---
+title: "9 - exercise"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+Pick a ticker - any ticker. For this exercise you'll compute the full performance dashboard and run a simple moving-average crossover backtest against buy-and-hold. At the end, in plain English, tell me which you'd prefer to hold and why.
+
+### 1. Load libraries
+
+```{r}
+#| label: load-libraries
+#| warning: false
+#| message: false
+
+
+```
+
+### 2. Grab 15 years of daily data and compute returns
+
+```{r}
+#| label: grab-data
+#| warning: false
+
+
+```
+
+### 3. Compute the core metrics
+
+Write a function `perf_summary(r, rf_annual = 0.04)` that takes a vector of daily returns and returns a one-row tibble with annualized return, annualized volatility, Sharpe, Sortino, and max drawdown. Apply it to your buy-and-hold return series.
+
+```{r}
+#| label: perf-summary-fn
+
+
+```
+
+### 4. Drawdown chart
+
+Plot the drawdown (equity curve divided by its running max, minus 1) for buy-and-hold. Shade it red.
+
+```{r}
+#| label: drawdown-chart
+
+
+```
+
+### 5. Backtest a 50/200 SMA crossover
+
+Build signal and strategy returns. Remember to lag the signal by one day to avoid look-ahead bias.
+
+```{r}
+#| label: backtest
+
+
+```
+
+### 6. Head-to-head table
+
+Stack buy-and-hold and the strategy in a single tibble using your `perf_summary` function so you can compare side by side.
+
+```{r}
+#| label: head-to-head
+
+
+```
+
+### 7. Equity curves
+
+Plot both equity curves on a log scale so both sides of the chart are readable.
+
+```{r}
+#| label: equity-curves
+
+
+```
+
+### 8. Interpretation
+
+Two to four sentences. Which would you rather hold? Why? What are the limits of what this test actually demonstrates?
+
+**ANSWER:**

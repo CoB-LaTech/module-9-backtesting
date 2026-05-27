@@ -1,0 +1,255 @@
+---
+title: "9: Performance evaluation and simple backtesting"
+format: 
+  html: 
+    embed-resources: true
+editor: visual
+---
+
+## Did the strategy actually work?
+
+You heard it at a conference, read it in a book, or saw it on a YouTube channel: "buy when the 50-day crosses above the 200-day, sell when it crosses back below." Great. Does it actually work? That's what backtesting is for. And once we have a strategy's returns, we need the right metrics to judge it - Sharpe ratio, Sortino ratio, max drawdown - not just the total return, which is the single most misleading number in all of finance.
+
+In this lesson we'll compute the performance metrics the pros care about, then run a simple moving-average crossover backtest on a real ticker and compare it to buy-and-hold. We'll be honest about what the test proves (not much) and what it doesn't.
+
+### Load libraries
+
+```{r}
+#| label: load-libraries
+#| warning: false
+#| message: false
+
+library(tidyverse)
+library(tidyquant)
+library(PerformanceAnalytics)
+library(timetk)
+library(scales)
+```
+
+### Grab data
+
+We'll use AAPL. You can easily swap this for anything else when you run the code yourself.
+
+```{r}
+#| label: grab-aapl
+#| warning: false
+#| message: false
+
+today   <- Sys.Date()
+years15 <- today %m-% years(15)
+
+aapl_prices <- tq_get("AAPL",
+                      get  = "stock.prices",
+                      from = years15,
+                      to   = today)
+
+aapl_ret <- aapl_prices |>
+    arrange(date) |>
+    mutate(ret = adjusted / lag(adjusted) - 1) |>
+    drop_na(ret) |>
+    select(date, adjusted, ret)
+```
+
+### Core performance metrics
+
+Let's build the key numbers from scratch so you understand what they are, then we'll cross-check with `PerformanceAnalytics`.
+
+#### Annualized return
+
+```{r}
+#| label: annualized-return
+
+n_years  <- as.numeric(difftime(max(aapl_ret$date), min(aapl_ret$date), units = "days")) / 365.25
+total_g  <- prod(1 + aapl_ret$ret)
+ann_ret  <- total_g^(1 / n_years) - 1
+
+percent(ann_ret, accuracy = 0.01)
+```
+
+This is the compound annual growth rate (CAGR). It's the number to quote when someone asks about "the return" - the average daily return times 252 is wrong and will mislead you because compounding is multiplicative, not additive.
+
+#### Annualized volatility
+
+```{r}
+#| label: annualized-volatility
+
+ann_vol <- sd(aapl_ret$ret) * sqrt(252)
+
+percent(ann_vol, accuracy = 0.01)
+```
+
+We multiply by the square root of 252 (trading days) to annualize daily standard deviation. That's the standard convention.
+
+#### Sharpe ratio
+
+The Sharpe ratio is excess return over the risk-free rate divided by volatility. It answers, "how much return did I get per unit of risk?" Higher is better. Anything above 1 on an equity position is very respectable; above 2 is suspicious until you verify it; above 3, call a regulator.
+
+We'll assume a risk-free rate of 4% annually for the moment - you can adjust that with the current 3-month T-bill yield if you want to be precise.
+
+```{r}
+#| label: sharpe
+
+rf_annual <- 0.04
+sharpe    <- (ann_ret - rf_annual) / ann_vol
+
+round(sharpe, 3)
+```
+
+#### Sortino ratio
+
+The Sortino ratio is like the Sharpe, but it only punishes *downside* volatility, not total volatility. The logic is sensible - upside volatility is a good thing and shouldn't count against a strategy. We use the standard deviation of negative returns only.
+
+```{r}
+#| label: sortino
+
+down_vol  <- sd(aapl_ret$ret[aapl_ret$ret < 0]) * sqrt(252)
+sortino   <- (ann_ret - rf_annual) / down_vol
+
+round(sortino, 3)
+```
+
+Sortino is almost always higher than Sharpe for the same asset, because removing the upside vol shrinks the denominator.
+
+#### Maximum drawdown
+
+Drawdown is the percentage peak-to-trough decline in your equity curve. Max drawdown is the worst such drop over your history. This is the number that actually matters to retirees and to investors who get margin calls.
+
+```{r}
+#| label: max-drawdown
+
+eq_curve <- aapl_ret |>
+    mutate(wealth   = cumprod(1 + ret),
+           peak     = cummax(wealth),
+           drawdown = wealth / peak - 1)
+
+max_dd <- min(eq_curve$drawdown)
+
+percent(max_dd, accuracy = 0.01)
+
+eq_curve |>
+    ggplot(aes(x = date, y = drawdown)) +
+    geom_area(fill = "firebrick", alpha = 0.5) +
+    scale_y_continuous(labels = percent) +
+    labs(title = "AAPL drawdown",
+         x = "", y = "Drawdown from peak") +
+    theme_minimal()
+```
+
+That red is where your actual money lived when the peaks went away. A -50% drawdown means a \$100K portfolio was briefly worth \$50K. Whatever your annualized return looks like, that's the emotional experience of holding the position.
+
+#### Cross-check with PerformanceAnalytics
+
+```{r}
+#| label: perfanal-check
+#| warning: false
+
+aapl_xts <- aapl_ret |>
+    tk_xts(select = ret, date_var = date)
+
+SharpeRatio.annualized(aapl_xts, Rf = rf_annual / 252)
+SortinoRatio(aapl_xts, MAR = rf_annual / 252)
+maxDrawdown(aapl_xts)
+```
+
+Numbers should match (give or take a convention tweak). Good. Now we trust our math.
+
+### A simple SMA-crossover backtest
+
+Here's the rule. Every day, look at the 50-day SMA and the 200-day SMA of the adjusted close.
+
+-   If the 50-day is above the 200-day, hold the stock (position = 1).
+-   Otherwise, hold cash (position = 0).
+
+The "signal" is known only after the close, so to avoid look-ahead bias we apply today's signal to *tomorrow's* return.
+
+```{r}
+#| label: sma-backtest
+#| warning: false
+
+bt <- aapl_prices |>
+    arrange(date) |>
+    mutate(
+        sma50     = TTR::SMA(adjusted, 50),
+        sma200    = TTR::SMA(adjusted, 200),
+        signal    = if_else(sma50 > sma200, 1, 0),
+        ret       = adjusted / lag(adjusted) - 1,
+        # lag the signal so today's return uses yesterday's signal
+        strat_ret = lag(signal) * ret
+    ) |>
+    drop_na(ret, strat_ret)
+```
+
+Now compute equity curves for buy-and-hold vs. the strategy:
+
+```{r}
+#| label: equity-curves
+#| warning: false
+
+curves <- bt |>
+    mutate(buy_hold = cumprod(1 + ret),
+           strategy = cumprod(1 + strat_ret)) |>
+    select(date, buy_hold, strategy) |>
+    pivot_longer(-date, names_to = "which", values_to = "wealth")
+
+curves |>
+    ggplot(aes(x = date, y = wealth, color = which)) +
+    geom_line(linewidth = 1) +
+    scale_y_continuous(labels = dollar, trans = "log10") +
+    labs(title    = "AAPL: 50/200 SMA crossover vs buy-and-hold",
+         subtitle = "Log scale; $1 invested at start",
+         x = "", y = "Wealth ($)", color = "") +
+    theme_minimal()
+```
+
+### Head-to-head stats
+
+```{r}
+#| label: head-to-head
+
+perf_summary <- function(r, rf_annual = 0.04) {
+    r      <- r[!is.na(r)]
+    n_yr   <- length(r) / 252
+    tot_g  <- prod(1 + r)
+    ann_r  <- tot_g^(1 / n_yr) - 1
+    ann_v  <- sd(r) * sqrt(252)
+    dn_v   <- sd(r[r < 0]) * sqrt(252)
+    sr     <- (ann_r - rf_annual) / ann_v
+    so     <- (ann_r - rf_annual) / dn_v
+    eq     <- cumprod(1 + r)
+    dd     <- eq / cummax(eq) - 1
+    mdd    <- min(dd)
+
+    tibble(
+        ann_return    = percent(ann_r, 0.01),
+        ann_vol       = percent(ann_v, 0.01),
+        sharpe        = round(sr,  2),
+        sortino       = round(so,  2),
+        max_drawdown  = percent(mdd, 0.01)
+    )
+}
+
+bind_rows(
+    perf_summary(bt$ret)       |> mutate(strategy = "Buy and hold", .before = 1),
+    perf_summary(bt$strat_ret) |> mutate(strategy = "50/200 SMA crossover", .before = 1)
+)
+```
+
+### What this actually tells you
+
+Here's the honest part. On many single stocks over many periods, buy-and-hold beats a simple SMA-crossover on total return, because the crossover sits in cash during recoveries and misses some of the upside. But the crossover often has a much smaller max drawdown and higher Sharpe, because it dodges the worst of the big declines. Which is "better" depends entirely on what you care about - absolute return, or risk-adjusted return, or sleeping at night.
+
+This is also just one strategy, one ticker, one historical period, one set of parameters (why 50 and 200? why not 20 and 100?). A real backtest would:
+
+-   Test on many tickers
+-   Use out-of-sample periods
+-   Test parameter robustness (grid-search over fast/slow lookbacks)
+-   Include transaction costs and slippage
+-   Use realistic sizing and margin assumptions
+
+What we've built is an honest minimal example. It's exactly the kind of thing you'd build first when evaluating any rules-based strategy, before investing real money or telling a client about it.
+
+### Conclusion
+
+Performance evaluation and backtesting are where coding in finance really pays off. You can build these equity curves and metrics in Excel, but it takes forever and you can't easily swap tickers, parameters, or date ranges. In R, once the function is written, checking a new idea is a 30-second job. That's the whole point.
+
+Next up, the capstone: we're going to wrap a lot of what we've done into an interactive Shiny app that lets a user pick tickers, weights, and a date range, then see performance metrics, drawdowns, and a forecast in real time. You're going to love it.
