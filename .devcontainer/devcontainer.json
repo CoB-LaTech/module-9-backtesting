@@ -1,0 +1,28 @@
+{
+  "name": "CoB-LaTech R/Finance",
+  "image": "rocker/tidyverse:4.4.2",
+  "features": {
+    "ghcr.io/rocker-org/devcontainer-features/quarto-cli:1": {}
+  },
+  "postCreateCommand": "Rscript /workspaces/.devcontainer/install-packages.R",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "quarto.quarto",
+        "reditorsupport.r",
+        "posit.shiny"
+      ],
+      "settings": {
+        "r.rterm.linux": "/usr/local/bin/R",
+        "r.bracketedPaste": true,
+        "editor.formatOnSave": false,
+        "[quarto]": {
+          "editor.defaultFormatter": "quarto.quarto"
+        }
+      }
+    }
+  },
+  "remoteEnv": {
+    "RENV_PATHS_CACHE": "/renv/cache"
+  }
+}
